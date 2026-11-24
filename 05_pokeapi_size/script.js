@@ -1,0 +1,476 @@
+const TOTAL_POKEMON = 1025;
+const SPRITE_BASE = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon";
+const API_BASE = "https://pokeapi.co/api/v2/pokemon";
+const GRAPHQL_API = "https://graphql.pokeapi.co/v1beta2";
+
+const grid = document.getElementById("grid");
+const countEl = document.getElementById("count");
+const searchInput = document.getElementById("search");
+const typeFilters = document.getElementById("typeFilters");
+const sortStat = document.getElementById("sortStat");
+const sortDirection = document.getElementById("sortDirection");
+const modal = document.getElementById("modal");
+const modalBody = document.getElementById("modalBody");
+const closeModalBtn = document.getElementById("closeModal");
+const modalContent = document.querySelector(".modal-content");
+
+// APIから返るタイプ名を、画面で使っている元のタイプカラーへ対応させる。
+const typeColors = {
+  normal: "#A8A878",
+  fire: "#F08030",
+  water: "#6890F0",
+  electric: "#F8D030",
+  grass: "#78C850",
+  ice: "#98D8D8",
+  fighting: "#C03028",
+  poison: "#A040A0",
+  ground: "#E0C068",
+  flying: "#A890F0",
+  psychic: "#F85888",
+  bug: "#A8B820",
+  rock: "#B8A038",
+  ghost: "#705898",
+  dragon: "#7038F8",
+  dark: "#705848",
+  steel: "#B8B8D0",
+  fairy: "#EE99AC",
+};
+
+// タイプ名を日本語に対応させる
+const typeNames = {
+  normal: "ノーマル",
+  fire: "ほのお",
+  water: "みず",
+  electric: "でんき",
+  grass: "くさ",
+  ice: "こおり",
+  fighting: "かくとう",
+  poison: "どく",
+  ground: "じめん",
+  flying: "ひこう",
+  psychic: "エスパー",
+  bug: "むし",
+  rock: "いわ",
+  ghost: "ゴースト",
+  dragon: "ドラゴン",
+  dark: "あく",
+  steel: "はがね",
+  fairy: "フェアリー",
+};
+
+// 合計種族値に応じたカードの大きさ(rows=縦のマス数, cols=横のマス数)。
+// 上から順に判定し、最初に条件を満たしたサイズを使う。
+const SIZE_TIERS = [
+  { min: 670, rows: 3, cols: 3 }, // 3×3: 伝説・幻クラス
+  { min: 600, rows: 2, cols: 3 }, // 2×3(横長)
+  { min: 540, rows: 3, cols: 2 }, // 3×2(縦長)
+  { min: 480, rows: 2, cols: 2 }, // 2×2
+  { min: 400, rows: 1, cols: 2 }, // 1×2(横長)
+  { min: 0,   rows: 1, cols: 1 }, // 1×1: 今までと同じサイズ
+];
+
+function getSizeTier(id) {
+  const total = statsCache.get(id)?.total;
+  if (!statsAvailable || total === undefined) return SIZE_TIERS[SIZE_TIERS.length - 1];
+  return SIZE_TIERS.find(tier => total >= tier.min);
+}
+
+// 現在選択されているタイプ(空文字=すべて)
+let selectedTypes = [];
+let statsAvailable = false;
+
+countEl.textContent = `${TOTAL_POKEMON}匹`;
+
+const nameCache = new Map();
+const typeCache = new Map();
+const statsCache = new Map();
+
+async function fetchAllJapaneseNames() {
+  const query = `
+    query {
+      pokemonspeciesname(
+        where: {
+          language_id: { _eq: 1 }
+          pokemon_species_id: { _lte: ${TOTAL_POKEMON} }
+        }
+      ) {
+        name
+        pokemon_species_id
+      }
+    }
+  `;
+  const res = await fetch(GRAPHQL_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) throw new Error("Failed to fetch names");
+  const json = await res.json();
+  const rows = json.data?.pokemonspeciesname ?? [];
+  for (const row of rows) {
+    nameCache.set(row.pokemon_species_id, row.name);
+  }
+}
+
+async function fetchAllPokemonTypes() {
+  const query = `
+    query {
+      pokemontype(
+        where: {
+          pokemon_id: {_lte: ${TOTAL_POKEMON}}
+        }
+      ) {
+        pokemon_id
+        type_id
+        type {
+          name
+        }
+      }
+    }
+  `;
+  const res = await fetch(GRAPHQL_API, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({query})
+  });
+  if (!res.ok) {
+    throw new Error("Failed to fetch Pokemon types");
+  }
+  const json = await res.json();
+  const rows = json.data?.pokemontype ?? [];
+  for (let id = 1; id <= TOTAL_POKEMON; id++) {
+    typeCache.set(id, []);
+  }
+  for (const row of rows) {
+    const types = typeCache.get(row.pokemon_id) || [];
+    const typeName = row.type?.name;
+    if (typeName) {
+      types.push(typeName);
+    }
+    typeCache.set(
+      row.pokemon_id,
+      types
+    );
+  }
+}
+
+async function fetchAllPokemonStats() {
+  const query = `
+    query {
+      pokemonstat(
+        where: {
+          pokemon_id: {_lte: ${TOTAL_POKEMON}}
+          stat_id: {_in: [1, 2, 3, 4, 5, 6]}
+        }
+      ) {
+        pokemon_id
+        base_stat
+        stat {
+          name
+        }
+      }
+    }
+  `;
+  const res = await fetch(GRAPHQL_API, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({query})
+  });
+  if (!res.ok) {
+    throw new Error("Failed to fetch Pokemon stats");
+  }
+  const json = await res.json();
+  const rows = json.data?.pokemonstat ?? [];
+  if (rows.length !== TOTAL_POKEMON * 6) {
+    throw new Error("Pokemon stats are incomplete");
+  }
+  for (const row of rows) {
+    const stats = statsCache.get(row.pokemon_id) || {};
+    const statName = row.stat?.name;
+    if (statName) stats[statName] = row.base_stat;
+    statsCache.set(row.pokemon_id, stats);
+  }
+  statsCache.forEach(stats => {
+    stats.total = Object.values(stats).reduce((sum, value) => sum + value, 0);
+  });
+  statsAvailable = statsCache.size === TOTAL_POKEMON;
+}
+
+// タイプ絞り込みボタンを作成
+function buildTypeFilters() {
+  typeFilters.innerHTML = "";
+  Object.entries(typeNames).forEach(([type, japaneseName]) => {
+    const button = document.createElement("button");
+    button.className = `type-filter type-${type}`;
+    button.dataset.type = type;
+    button.textContent = japaneseName;
+    button.addEventListener("click", () => {
+      if (selectedTypes.includes(type)) {
+        // 選択中なら解除
+        selectedTypes = selectedTypes.filter(
+          selectedType => selectedType !== type
+        );
+      } else {
+        // 未選択なら追加
+        selectedTypes.push(type);
+      }
+      updateTypeButtons();
+      filterCards();
+    });
+    typeFilters.appendChild(button);
+  });
+  // リセットボタン
+  const resetButton = document.createElement("button");
+  resetButton.className = "type-filter reset-button";
+  resetButton.textContent = "リセット";
+  resetButton.addEventListener("click", () => {
+    selectedTypes = [];
+    updateTypeButtons();
+    filterCards();
+  });
+  typeFilters.appendChild(resetButton);
+}
+
+// タイプボタンの選択状態を更新
+function updateTypeButtons() {
+  const buttons = typeFilters.querySelectorAll(".type-filter");
+  buttons.forEach(button => {
+    const type = button.dataset.type;
+    if (selectedTypes.includes(type)) {
+      button.classList.add("selected");
+    } else {
+      button.classList.remove("selected");
+    }
+  });
+}
+
+function buildGrid() {
+  const fragment = document.createDocumentFragment();
+  for (let id = 1; id <= TOTAL_POKEMON; id++) {
+    const jaName = nameCache.get(id) || "";
+    const types = typeCache.get(id) || [];
+    const tier = getSizeTier(id);
+    const isLarge = tier.rows * tier.cols >= 4;
+    const total = statsCache.get(id)?.total;
+    const card = document.createElement("div");
+    card.className = `card size-${tier.rows}x${tier.cols}`;
+    card.style.gridRow = `span ${tier.rows}`;
+    card.style.gridColumn = `span ${tier.cols}`;
+    card.dataset.id = String(id);
+    card.dataset.name = jaName;
+    card.dataset.types = types.join(",");
+    // 大きいカードはドット絵だと粗くなるので、公式イラストを使う。
+    const imgSrc = isLarge
+      ? `${SPRITE_BASE}/other/official-artwork/${id}.png`
+      : `${SPRITE_BASE}/${id}.png`;
+    // 先頭タイプの色をカードの背景アクセントに使う。
+    if (types[0]) card.style.setProperty("--card-type-color", typeColors[types[0]]);
+    card.innerHTML = `
+      <img src="${imgSrc}" alt="${jaName || `No.${id}`}" loading="lazy">
+      <div class="num">No.${String(id).padStart(4, "0")}</div>
+      <div class="name">${jaName}</div>
+      ${total !== undefined && tier.rows * tier.cols > 1 ? `<div class="total">合計 ${total}</div>` : ""}
+    `;
+    card.addEventListener("click", () => openDetail(id));
+    fragment.appendChild(card);
+  }
+  grid.replaceChildren(fragment);
+}
+
+async function fetchJapaneseName(id) {
+  if (nameCache.has(id)) return nameCache.get(id);
+  const res = await fetch(`https://pokeapi.co/api/v2/pokemon-species/${id}`);
+  const data = await res.json();
+  const jaName = data.names.find((n) => n.language.name === "ja-Hrkt" || n.language.name === "ja");
+  const result = jaName ? jaName.name : data.name;
+  nameCache.set(id, result);
+  return result;
+}
+
+// 検索＋タイプ絞り込み
+function filterCards() {
+  const keyword = searchInput.value.trim().toLowerCase();
+  const cards = grid.querySelectorAll(".card");
+  let visibleCount = 0;
+  cards.forEach(card => {
+    const id = card.dataset.id;
+    const name = card.dataset.name.toLowerCase();
+    const types = card.dataset.types
+      ? card.dataset.types.split(",")
+      : [];
+    // 名前・番号による検索
+    const matchesSearch =
+      keyword === "" ||
+      id === keyword ||
+      id.padStart(4, "0") === keyword ||
+      name.includes(keyword);
+    // タイプによる検索
+    // 何も選択していない場合は全タイプを表示
+    // 複数選択されている場合は、どれか1つでも一致すれば表示
+    const matchesType =
+      selectedTypes.length === 0 ||
+      selectedTypes.some(type => types.includes(type));
+    if (matchesSearch && matchesType) {
+      card.classList.remove("hidden");
+      visibleCount++;
+    } else {
+      card.classList.add("hidden");
+    }
+    countEl.textContent = `${visibleCount}匹`;
+  });
+
+  const sortKey = sortStat.value;
+  const direction = sortDirection.value === "asc" ? 1 : -1;
+  const sortedCards = Array.from(cards).sort((a, b) => {
+    const idA = Number(a.dataset.id);
+    const idB = Number(b.dataset.id);
+    if (!sortKey || !statsAvailable) return idA - idB;
+    const difference = statsCache.get(idA)[sortKey] - statsCache.get(idB)[sortKey];
+    return difference === 0 ? idA - idB : difference * direction;
+  });
+  grid.append(...sortedCards);
+}
+
+async function init() {
+  grid.innerHTML = `<div class="loading">読み込み中...</div>`;
+  try {
+    // 名前とタイプを並行して取得
+    await Promise.all([
+      fetchAllJapaneseNames(),
+      fetchAllPokemonTypes(),
+      fetchAllPokemonStats().catch(err => {
+        sortStat.disabled = true;
+        sortStat.title = "能力値を取得できませんでした";
+        console.error(err);
+      })
+    ]);
+  } catch (err) {
+    console.error(err);
+  }
+  buildTypeFilters();
+  buildGrid();
+  filterCards();
+}
+
+async function openDetail(id) {
+  modal.classList.remove("hidden");
+  modalContent.style.removeProperty("--type-color-1");
+  modalContent.style.removeProperty("--type-color-2");
+  modalBody.innerHTML = `<div class="loading">読み込み中...</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/${id}`);
+    const data = await res.json();
+    const jaName = await fetchJapaneseName(id);
+
+    const card = grid.querySelector(`.card[data-id="${id}"]`);
+    if (card) {
+      card.querySelector(".name").textContent = jaName;
+      card.dataset.name = jaName;
+    }
+
+    const typesHtml = data.types
+      .map(
+        (t) =>
+          `<span class="type-badge type-${t.type.name}">${t.type.name}</span>`
+      )
+      .join("");
+
+    // タイプの元色を50%白と混ぜ、淡い色にしてモーダルへ渡す。
+    const paleTypeColors = data.types.map((type) => {
+      const originalColor = typeColors[type.type.name] || "#ffffff";
+      return `color-mix(in srgb, ${originalColor}, white 50%)`;
+    });
+    modalContent.style.setProperty("--type-color-1", paleTypeColors[0]);
+    modalContent.style.setProperty(
+      "--type-color-2",
+      paleTypeColors[1] || paleTypeColors[0]
+    );
+
+    // APIから受け取った6種類のステータスを、画面用のHTMLへ変換する。
+    const statsHtml = data.stats
+      // mapは、ステータス1件ごとに同じ形のHTMLを作る。
+      .map(
+        (s) => `
+          <tr>
+            <td colspan="2">
+              <!-- タイトルと数値を、バーの上に左右へ分けて表示する。 -->
+              <div class="stat-heading">
+                <span>${s.stat.name}</span>
+                <span class="stat-value">${s.base_stat}</span>
+              </div>
+              <!-- 外側がバー全体、内側が数値に応じて伸びる部分。 -->
+              <div class="stat-bar" role="progressbar" aria-label="${s.stat.name}: ${s.base_stat}" aria-valuemin="1" aria-valuemax="255" aria-valuenow="${s.base_stat}">
+                <!-- アニメーション開始前はCSSで幅を0%にしておく。 -->
+                <span class="stat-bar-fill" data-value="${s.base_stat}"></span>
+              </div>
+            </td>
+          </tr>`
+      )
+      // mapで作った各行を、1つのHTML文字列につなげる。
+      .join("");
+
+    // 作成したステータスHTMLを、詳細ページのテーブルへ差し込む。
+    modalBody.innerHTML = `
+      <div class="detail-header">
+        <img src="${SPRITE_BASE}/${id}.png" alt="${jaName}">
+        <div>
+          <h2>${jaName}</h2>
+          <div>No.${String(id).padStart(4, "0")}</div>
+          <div class="types">${typesHtml}</div>
+        </div>
+      </div>
+      <table class="stats-table">
+        <tr><td>身長</td><td>${data.height / 10} m</td></tr>
+        <tr><td>体重</td><td>${data.weight / 10} kg</td></tr>
+        ${statsHtml}
+      </table>
+    `;
+
+    // HTMLが画面に描画された次のタイミングで、バーのアニメーションを始める。
+    requestAnimationFrame(() => {
+      // 6本のバーを1本ずつ取得する。
+      modalBody.querySelectorAll(".stat-bar-fill").forEach((fill, index) => {
+        // indexを使って、2本目以降の開始を少しずつ遅らせる。
+        window.setTimeout(() => {
+          // HTML属性に保存していたステータスの数値を、計算用の数値へ変換する。
+          const value = Number(fill.dataset.value);
+          // 最大値255に対する割合を計算し、バーの幅へ設定する。
+          fill.style.width = `${(value / 255) * 100}%`;
+        }, index * 90);
+      });
+    });
+  } catch (err) {
+    modalBody.innerHTML = `<div class="loading">読み込みに失敗しました。</div>`;
+    console.error(err);
+  }
+}
+
+closeModalBtn.addEventListener("click", () => modal.classList.add("hidden"));
+modal.addEventListener("click", (e) => {
+  if (e.target === modal) modal.classList.add("hidden");
+});
+
+searchInput.addEventListener("input", () => {
+  filterCards();
+});
+
+sortStat.addEventListener("change", () => {
+  sortDirection.disabled = sortStat.value === "" || !statsAvailable;
+  filterCards();
+});
+
+sortDirection.addEventListener("change", filterCards);
+
+/*
+searchInput.addEventListener("input", () => {
+  const query = searchInput.value.trim().toLowerCase();
+  document.querySelectorAll(".card").forEach((card) => {
+    const id = card.dataset.id;
+    const name = (card.dataset.name || "").toLowerCase();
+    const matches =
+      !query || id === query || id.padStart(4, "0") === query || name.includes(query);
+    card.classList.toggle("hidden", !matches);
+  });
+});*/
+
+init();
